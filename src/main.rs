@@ -126,6 +126,14 @@ impl Rect {
 }
 
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PlayerAction {
+    TookTurn,
+    DidntTakeTurn,
+    Exit,
+}
+
+
 fn create_room(room: Rect, map: &mut Map) {
     for x in (room.x1 + 1)..room.x2 {
         for y in (room.y1 + 1)..room.y2 {
@@ -161,11 +169,10 @@ fn is_blocked(x: i32, y: i32, map: &Map, objects: &[Object]) -> bool {
 }
 
 
-fn make_map(objects: &mut Vec<Object>) -> (Map, (i32, i32)) {
+fn make_map(objects: &mut Vec<Object>) -> Map {
     // fill map with "unblocked" tiles
     let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
 
-    let mut starting_position = (0, 0);
     let mut rooms = vec![];
 
     for _ in 0..MAX_ROOMS {
@@ -190,7 +197,7 @@ fn make_map(objects: &mut Vec<Object>) -> (Map, (i32, i32)) {
 
             if rooms.is_empty() {
                 // first room, where the player starts at
-                starting_position = (new_x, new_y);
+                objects[PLAYER].set_pos(new_x, new_y);
             } else {
                 // all rooms after the first
                 let (prev_x, prev_y) = rooms[rooms.len() - 1].center();
@@ -208,7 +215,7 @@ fn make_map(objects: &mut Vec<Object>) -> (Map, (i32, i32)) {
         }
     }
 
-    (map, starting_position)
+    map
 }
 
 
@@ -291,7 +298,6 @@ fn render_all(root: &mut Root, con: &mut Offscreen, objects: &[Object], map: &mu
         }
     }
 
-
     blit(con, (0, 0), (MAP_WIDTH, MAP_HEIGHT), root, (0, 0), 1.0, 1.0);
 }
 
@@ -306,19 +312,17 @@ fn main() {
     tcod::system::set_fps(LIMIT_FPS);
     let mut con = Offscreen::new(MAP_WIDTH, MAP_HEIGHT);
 
-    let mut objects = vec![];
-    let (mut map, (player_x, player_y)) = make_map(&mut objects);
-
     // create object representing the player
-    let mut player = Object::new(player_x, player_y, '@', "player", colors::WHITE, true);
+    let mut player = Object::new(0, 0, '@', "player", colors::WHITE, true);
     player.alive = true;
 
     // the list of objects with just the player
+    let mut objects = vec![player];
 
-    objects.insert(0, player);
+    // generate map (at this point it's not drawn to the screen)
+    let mut map= make_map(&mut objects);
 
-
-
+    // create the FOV map, according to the generated map
     let mut fov_map = FovMap::new(MAP_WIDTH, MAP_HEIGHT);
     for y in 0..MAP_HEIGHT {
         for x in 0..MAP_WIDTH {
@@ -327,48 +331,99 @@ fn main() {
                 !map[x as usize][y as usize].blocked);
         }
     }
+
+    // force FOV "recompute" first time through the game loop
     let mut previous_player_position = (-1, -1);
 
     while !root.window_closed() {
-
+        // render the screen
         let fov_recompute = previous_player_position != (objects[PLAYER].x, objects[PLAYER].y);
         render_all(&mut root, &mut con, &objects, &mut map, &mut fov_map, fov_recompute);
 
         root.flush();
 
+        // erase all the objects at their old locations, before they move
         for object in &objects {
             object.clear(&mut con)
         }
+
         // handle keys and exit game if needed
         let player = &mut objects[PLAYER];
         previous_player_position = (player.x, player.y);
-        let exit = handle_keys(&mut root, &mut objects, &map);
-        if exit {
+        let player_action = handle_keys(&mut root, &map, &mut objects);
+        if player_action == PlayerAction::Exit {
             break
+        }
+
+        // let monsters take their turn
+        if objects[PLAYER].alive && player_action != PlayerAction::DidntTakeTurn {
+            for object in &objects {
+                // only if object is not player
+                if (object as *const _) != (&objects[PLAYER] as *const _) {
+                    println!("The {} growls", object.name);
+                }
+            }
         }
     }
 }
 
-fn handle_keys(root: &mut Root, objects: &mut [Object], map: &Map) -> bool {
+
+fn player_move_or_attack(dx: i32, dy: i32, map: &Map, objects: &mut [Object]) {
+    // the coordinates the player is moving to/attacking
+    let x = objects[PLAYER].x + dx;
+    let y = objects[PLAYER].y + dy;
+
+    // try to find an attackable object there
+    let target_id = objects.iter().position(|object| {
+        object.pos() == (x, y)
+    });
+
+    // attack if target found, move otherwise
+    match target_id {
+        Some(target_id) => {
+            println!("The {} laughs at your puny efforts to attack him!",
+                objects[target_id].name);
+        }
+        None => {
+            move_by(PLAYER, dx, dy, map, objects);
+        }
+    }
+}
+
+
+fn handle_keys(root: &mut Root, map: &Map, objects: &mut [Object]) -> PlayerAction {
     use tcod::input::Key;
     use tcod::input::KeyCode::*;
+    use PlayerAction::*;
 
     let key = root.wait_for_keypress(true);
-    match key {
-        Key { code: Up, .. } => move_by(PLAYER, 0,-1, map, objects),
-        Key { code: Down, .. } => move_by(PLAYER, 0, 1, map, objects),
-        Key { code: Left, .. } => move_by(PLAYER,-1, 0, map, objects),
-        Key { code: Right, .. } => move_by(PLAYER, 1, 0, map, objects),
+    let player_alive = objects[PLAYER].alive;
+    match (key, player_alive) {
+        (Key { code: Up, .. }, true) => {
+            player_move_or_attack(0, -1, map, objects);
+            TookTurn
+        },
+        (Key { code: Down, .. }, true) => {
+            player_move_or_attack(0, 1, map, objects);
+            TookTurn
+        },
+        (Key { code: Left, .. }, true) => {
+            player_move_or_attack(-1, 0, map, objects);
+            TookTurn
+        },
+        (Key { code: Right, .. }, true) => {
+            player_move_or_attack(1, 0, map, objects);
+            TookTurn
+        },
 
-        Key { code: Enter, alt: true, .. } => {
+        (Key { code: Enter, alt: true, .. }, _) => {
             // Alt+Enter: toggle fullscreen
             let fullscreen = root.is_fullscreen();
             root.set_fullscreen(!fullscreen);
+            DidntTakeTurn
         },
-        Key { code: Escape, .. } => return true,
+        (Key { code: Escape, .. }, _) => Exit,
 
-        _ => {}
+        _ => DidntTakeTurn,
     }
-
-    false
 }
