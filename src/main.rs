@@ -44,18 +44,22 @@ struct Object {
     name: String,
     blocks: bool,
     alive: bool,
+    fighter: Option<Fighter>,
+    ai: Option<Ai>,
 }
 
 impl Object {
     pub fn new(x: i32, y: i32, char: char, name: &str, color: Color, blocks: bool) -> Self {
         Object {
-            x: x,
-            y: y,
-            char: char,
-            color: color,
+            x,
+            y,
+            char,
+            color,
             name: name.into(),
-            blocks: blocks,
+            blocks,
             alive: false,
+            fighter: None,
+            ai: None,
         }
     }
 
@@ -78,7 +82,28 @@ impl Object {
         self.x = x;
         self.y = y;
     }
+
+    // return the distance to another object
+    pub fn distance_to(&self, other: &Object) -> f32 {
+        let dx = other.x - self.x;
+        let dy = other.y - self.y;
+        ((dx.pow(2) + dy.pow(2)) as f32).sqrt()
+    }
 }
+
+
+// combat-related properties and methods (monster, player, NPC).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fighter {
+    max_hp: i32,
+    hp: i32,
+    defense: i32,
+    power: i32,
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Ai;
 
 
 #[derive(Clone, Copy, Debug)]
@@ -229,6 +254,20 @@ fn move_by(id: usize, dx: i32, dy: i32, map: &Map, objects: &mut [Object]) {
 }
 
 
+fn move_towards(id: usize, target_x: i32, target_y: i32, map: &Map, objects: &mut [Object]) {
+    // vector from this object to the target, and distance
+    let dx = target_x - objects[id].x;
+    let dy = target_y - objects[id].y;
+    let distance = ((dx.pow(2) + dy.pow(2)) as f32).sqrt();
+
+    // normalize it to length 1 (preserving direction), then round it and
+    // convert to integer so the movement is restricted to the map grid
+    let dx = (dx as f32 / distance).round() as i32;
+    let dy = (dy as f32 / distance).round() as i32;
+    move_by(id, dx, dy, map, objects);
+}
+
+
 fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>) {
     // choose random number of monsters
     let num_monsters = rand::thread_rng().gen_range(0, MAX_ROOM_MONSTERS + 1);
@@ -243,9 +282,15 @@ fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>) {
             // 80% chance of getting an orc
             let mut monster = if rand::random::<f32>() < 0.8 {
                 // create an orc
-                Object::new(x, y, 'o', "orc",colors::DESATURATED_GREEN, true)
+                let mut orc = Object::new(x, y, 'o', "orc",colors::DESATURATED_GREEN, true);
+                orc.fighter = Some(Fighter{max_hp: 10, hp: 10, defense: 0, power: 3});
+                orc.ai = Some(Ai);
+                orc
             } else {
-                Object::new(x, y, 'T', "troll", colors::DARKER_GREEN, true)
+                let mut troll = Object::new(x, y, 'T', "troll", colors::DARKER_GREEN, true);
+                troll.fighter = Some(Fighter{max_hp: 16, hp: 16, defense: 1, power 4});
+                troll.ai = Some(Ai);
+                troll
             };
 
             monster.alive = true;
@@ -315,6 +360,7 @@ fn main() {
     // create object representing the player
     let mut player = Object::new(0, 0, '@', "player", colors::WHITE, true);
     player.alive = true;
+    player.fighter = Some(Fighter{max_hp: 30, hp: 30, defense: 2, power: 5});
 
     // the list of objects with just the player
     let mut objects = vec![player];
