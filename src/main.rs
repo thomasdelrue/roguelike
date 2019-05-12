@@ -78,6 +78,7 @@ struct Game {
     map: Map,
     log: Messages,
     inventory: Vec<Object>,
+    dungeon_level: u32,
 }
 
 
@@ -104,6 +105,7 @@ struct Object {
     fighter: Option<Fighter>,
     ai: Option<Ai>,
     item: Option<Item>,
+    always_visible: bool,
 }
 
 impl Object {
@@ -119,6 +121,7 @@ impl Object {
             fighter: None,
             ai: None,
             item: None,
+            always_visible: false,
         }
     }
 
@@ -328,6 +331,9 @@ fn make_map(objects: &mut Vec<Object>) -> Map {
     // fill map with "unblocked" tiles
     let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
 
+    assert_eq!(&objects[PLAYER] as *const _, &objects[0] as *const _);
+    objects.truncate(1);
+
     let mut rooms = vec![];
 
     for _ in 0..MAX_ROOMS {
@@ -369,6 +375,12 @@ fn make_map(objects: &mut Vec<Object>) -> Map {
             rooms.push(new_room);
         }
     }
+
+    // create stairs at the center of the last room
+    let (last_room_x, last_room_y) = rooms[rooms.len() - 1].center();
+    let mut stairs = Object::new(last_room_x, last_room_y, '<', "stairs", colors::WHITE, false);
+    stairs.always_visible = true;
+    objects.push(stairs);
 
     map
 }
@@ -500,7 +512,7 @@ fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>) {
         // only place it if the tile is not blocked
         if ! is_blocked(x, y, map, objects) {
             let dice = rand::random::<f32>();
-            let item = if dice < 0.7 {
+            let mut item = if dice < 0.7 {
                 // create a healing potion
                 let mut object = Object::new(x, y, '!', "healing potion", colors::VIOLET, false);
                 object.item = Some(Item::Heal);
@@ -521,6 +533,7 @@ fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>) {
                 object.item = Some(Item::Confuse);
                 object
             };
+            item.always_visible = true;
             objects.push(item);
         }
     }
@@ -574,7 +587,11 @@ fn render_all(tcod: &mut Tcod, objects: &[Object], game: &mut Game, fov_recomput
 
     }
 
-    let mut to_draw: Vec<_> = objects.iter().filter(|o| tcod.fov.is_in_fov(o.x, o.y)).collect();
+    let mut to_draw: Vec<_> = objects.iter()
+        .filter(|o| {
+            tcod.fov.is_in_fov(o.x, o.y) ||
+            (o.always_visible && game.map[o.x as usize][o.y as usize].explored)
+        }).collect();
     // sort so that non-blocking objects come first
     to_draw.sort_by(|o1, o2| {o1.blocks.cmp(&o2.blocks)});
     // draw all objects in the list
@@ -590,6 +607,9 @@ fn render_all(tcod: &mut Tcod, objects: &[Object], game: &mut Game, fov_recomput
     let hp = objects[PLAYER].fighter.map_or(0, |f| f.hp);
     let max_hp = objects[PLAYER].fighter.map_or(0, |f| f.max_hp);
     render_bar(&mut tcod.panel, 1, 1, BAR_WIDTH, "HP", hp, max_hp, colors::LIGHT_RED, colors::DARKER_RED);
+
+    tcod.panel.print_ex(1, 3, BackgroundFlag::None, TextAlignment::Left,
+        format!("Dungeon level: {}", game.dungeon_level));
 
     // display names of objects under the mouse
     tcod.panel.set_default_foreground(colors::LIGHT_GREY);
@@ -672,6 +692,7 @@ fn new_game(tcod: &mut Tcod) -> (Vec<Object>, Game) {
         // create the list of game messages and their colors, starts empty
         log: vec![],
         inventory: vec![],
+        dungeon_level: 1,
     };
 
     initialise_fov(&game.map, tcod);
@@ -1141,7 +1162,16 @@ fn handle_keys(key: Key, tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Obj
                 drop_item(inventory_index, game, objects);
             }
             DidntTakeTurn
-        }
+        },
+
+        (Key { printable: '<', ..}, true) => {
+            let player_on_stairs = objects.iter().any(|obj|
+                obj.pos() == objects[PLAYER].pos() && obj.name == "stairs");
+            if player_on_stairs {
+                next_level(tcod, objects, game);
+            }
+            DidntTakeTurn
+        },
 
         _ => DidntTakeTurn,
     }
@@ -1184,4 +1214,18 @@ fn load_game() -> Result<(Vec<Object>, Game), Box<Error>> {
     file.read_to_string(&mut json_save_state)?;
     let result = serde_json::from_str::<(Vec<Object>, Game)>(&json_save_state)?;
     Ok(result)
+}
+
+
+/// Advance to the next level
+fn next_level(tcod: &mut Tcod, objects: &mut Vec<Object>, game: &mut Game) {
+    game.log.add("You take a moment to rest, and recover your strength.", colors::VIOLET);
+    let heal_hp = objects[PLAYER].fighter.map_or(0, |f| f.max_hp / 2);
+    objects[PLAYER].heal(heal_hp);
+
+    game.log.add("After a rare moment of peace, you descend deeper into \
+                           the heart of the dungeon...", colors::RED);
+    game.dungeon_level += 1;
+    game.map = make_map(objects);
+    initialise_fov(&game.map, tcod);
 }
